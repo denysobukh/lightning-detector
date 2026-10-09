@@ -12,6 +12,13 @@ const uint32_t I2C_TIMEOUT_US = 25000;
 #define NUM_LEDS   7     // set to the real number of LEDs on your strip
 #define BRIGHTNESS 50
 
+const uint32_t LED_COLOR_OFF = Adafruit_NeoPixel::Color(0, 0, 0);
+const uint32_t LED_COLOR_STARTUP = Adafruit_NeoPixel::Color(0, 80, 255);
+const uint32_t LED_COLOR_NOISE = Adafruit_NeoPixel::Color(255, 0, 120);
+const uint32_t LED_COLOR_DISTURBER = Adafruit_NeoPixel::Color(0, 255, 0);
+const uint32_t LED_COLOR_LIGHTNING_START = Adafruit_NeoPixel::Color(173, 216, 230);
+const uint32_t LED_COLOR_LIGHTNING_TRANSITION = Adafruit_NeoPixel::Color(0, 0, 255);
+
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 volatile bool irqFlag = false;
@@ -183,22 +190,20 @@ void setAllLeds(uint32_t color) {
 }
 
 void clearLeds() {
-  setAllLeds(strip.Color(0, 0, 0));
+  setAllLeds(LED_COLOR_OFF);
 }
 
 void showStartupLeds() {
-  uint32_t color = strip.Color(0, 80, 255);
-
   for (uint8_t i = 0; i < NUM_LEDS; i++) {
     clearLeds();
-    strip.setPixelColor(i, color);
+    strip.setPixelColor(i, LED_COLOR_STARTUP);
     strip.show();
     delay(90);
   }
 
   for (int8_t i = NUM_LEDS - 2; i >= 0; i--) {
     clearLeds();
-    strip.setPixelColor(i, color);
+    strip.setPixelColor(i, LED_COLOR_STARTUP);
     strip.show();
     delay(90);
   }
@@ -206,13 +211,11 @@ void showStartupLeds() {
   clearLeds();
 }
 
-void flashLeds(uint32_t color, uint8_t flashes, unsigned int onMs, unsigned int offMs) {
-  for (uint8_t i = 0; i < flashes; i++) {
-    setAllLeds(color);
-    delay(onMs);
-    clearLeds();
-    delay(offMs);
-  }
+void flashLeds(uint32_t color, unsigned int onMs, unsigned int offMs) {
+  setAllLeds(color);
+  delay(onMs);
+  clearLeds();
+  delay(offMs);
 }
 
 uint8_t ledCountForDistance(uint8_t dist) {
@@ -225,6 +228,16 @@ uint8_t ledCountForDistance(uint8_t dist) {
   return 2;                   // 34..40 km
 }
 
+uint32_t blendLedColors(uint32_t from, uint32_t to, uint8_t amount) {
+  uint32_t color = 0;
+  for (uint8_t shift = 0; shift <= 16; shift += 8) {
+    uint32_t fromChannel = (from >> shift) & 0xFF;
+    uint32_t toChannel = (to >> shift) & 0xFF;
+    color |= ((fromChannel * (255 - amount) + toChannel * amount) / 255) << shift;
+  }
+  return color;
+}
+
 void showLightningLeds(uint8_t dist) {
   uint8_t count = ledCountForDistance(dist);
 
@@ -232,16 +245,18 @@ void showLightningLeds(uint8_t dist) {
   strip.clear();
 
   for (int value = 255; value >= 0; value -= 15) {
+    uint32_t color = blendLedColors(LED_COLOR_LIGHTNING_TRANSITION, LED_COLOR_LIGHTNING_START, value);
     for (uint8_t i = 0; i < count; i++) {
-      strip.setPixelColor(i, strip.Color(value, value, 255));
+      strip.setPixelColor(i, color);
     }
     strip.show();
     delay(35);
   }
 
   for (int value = 255; value >= 0; value -= 15) {
+    uint32_t color = blendLedColors(LED_COLOR_OFF, LED_COLOR_LIGHTNING_TRANSITION, value);
     for (uint8_t i = 0; i < count; i++) {
-      strip.setPixelColor(i, strip.Color(0, 0, value));
+      strip.setPixelColor(i, color);
     }
     strip.show();
     delay(35);
@@ -252,12 +267,12 @@ void showLightningLeds(uint8_t dist) {
 }
 
 void showNoiseLeds() {
-  flashLeds(strip.Color(255, 0, 120), 2, 120, 120);
+  flashLeds(LED_COLOR_NOISE, 120, 120);
 }
 
 void showDisturberLeds() {
   strip.setBrightness(10);
-  flashLeds(strip.Color(0, 0, 255), 2, 120, 120);
+  flashLeds(LED_COLOR_DISTURBER, 120, 120);
   strip.setBrightness(BRIGHTNESS);
   clearLeds();
 }
