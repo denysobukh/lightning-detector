@@ -1,5 +1,7 @@
 #include <Wire.h>
 #include <Adafruit_NeoPixel.h>
+#include <avr/sleep.h>
+#include <avr/power.h>
 
 // Change this to match your I2C scanner result (usually 0x01, 0x02, or 0x03)
 #define AS3935_ADDR 0x03 
@@ -253,6 +255,41 @@ void showDisturberLeds() {
   clearLeds();
 }
 
+void disableAlwaysUnusedPeripherals() {
+  power_adc_disable();
+  power_spi_disable();
+  power_timer1_disable();
+  power_timer2_disable();
+}
+
+void disableSleepOnlyPeripherals() {
+  power_twi_disable();
+  power_usart0_disable();
+}
+
+void enableSleepOnlyPeripherals() {
+  power_usart0_enable();
+  power_twi_enable();
+}
+
+void enterLowPowerMode() {
+  clearLeds();
+  Serial.flush();
+  set_sleep_mode(SLEEP_MODE_IDLE);
+
+  noInterrupts();
+  if (!irqFlag) {
+    sleep_enable();
+    disableSleepOnlyPeripherals();
+    interrupts();
+    sleep_cpu();
+    sleep_disable();
+    enableSleepOnlyPeripherals();
+  } else {
+    interrupts();
+  }
+}
+
 void setup() {
   Serial.begin(9600);
   Wire.begin();
@@ -269,6 +306,7 @@ void setup() {
 
   Serial.println("AS3935 startup...");
   as3935_init();
+  disableAlwaysUnusedPeripherals();
   
   // Verify communication by reading back register 0x00
   uint8_t testRead = rd(0x00);
@@ -278,56 +316,64 @@ void setup() {
     Serial.println("AS3935 Ready and Listening!");
     dumpSettings();
   }
+
+  Serial.println("Entering low power mode; waiting for AS3935 IRQ...");
 }
 
 void loop() {
-  if (irqFlag) {
-    // Crucial: Wait 2ms after IRQ goes high before reading I2C
-    delay(2); 
-    
-    // Read interrupt source (Reg 0x03, bits [3:0])
-    uint8_t src = rd(0x03) & 0x0F;
-    
-    // Reset flag *after* reading register 0x03, which clears the hardware interrupt
-    irqFlag = false; 
+  if (!irqFlag) {
+    enterLowPowerMode();
+  }
 
-    switch (src) {
-      case 0x01:
-        printTimestamp();
-        Serial.println("[IRQ] Noise level too high.");
-        showNoiseLeds();
-        break;
+  if (!irqFlag) {
+    return;
+  }
 
-      case 0x04:
-        printTimestamp();
-        Serial.println("[IRQ] Disturber detected (false alarm rejected).");
-        showDisturberLeds();
-        break;
+  // Crucial: Wait 2ms after IRQ goes high before reading I2C
+  delay(2); 
+  
+  // Read interrupt source (Reg 0x03, bits [3:0])
+  uint8_t src = rd(0x03) & 0x0F;
+  
+  // Reset flag *after* reading register 0x03, which clears the hardware interrupt
+  irqFlag = false; 
 
-      case 0x08: {
-        uint8_t dist = rd(0x07) & 0x3F;
-        printTimestamp();
-        Serial.print("⚡ LIGHTNING DETECTED! Approximate Distance: ");
-        if (dist == 0x3F) {
-          Serial.println("Out of range (>40km)");
-        } else if (dist == 0x01) {
-          Serial.println("Storm overhead");
-        } else {
-          Serial.print(dist);
-          Serial.println(" km");
-        }
-        showLightningLeds(dist);
-        break;
+  switch (src) {
+    case 0x01:
+      printTimestamp();
+      Serial.println("[IRQ] Noise level too high.");
+      showNoiseLeds();
+      break;
+
+    case 0x04:
+      printTimestamp();
+      Serial.println("[IRQ] Disturber detected (false alarm rejected).");
+      showDisturberLeds();
+      break;
+
+    case 0x08: {
+      uint8_t dist = rd(0x07) & 0x3F;
+      printTimestamp();
+      Serial.print("⚡ LIGHTNING DETECTED! Approximate Distance: ");
+      if (dist == 0x3F) {
+        Serial.println("Out of range (>40km)");
+      } else if (dist == 0x01) {
+        Serial.println("Storm overhead");
+      } else {
+        Serial.print(dist);
+        Serial.println(" km");
       }
-
-      default:
-        // If it returns 0, it means it was a transient pulse that didn't meet criteria
-        if (src != 0) {
-          printTimestamp();
-          Serial.print("Unknown interrupt code: 0x");
-          Serial.println(src, HEX);
-        }
-        break;
+      showLightningLeds(dist);
+      break;
     }
+
+    default:
+      // If it returns 0, it means it was a transient pulse that didn't meet criteria
+      if (src != 0) {
+        printTimestamp();
+        Serial.print("Unknown interrupt code: 0x");
+        Serial.println(src, HEX);
+      }
+      break;
   }
 }
