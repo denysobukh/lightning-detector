@@ -6,6 +6,7 @@
 // Change this to match your I2C scanner result (usually 0x01, 0x02, or 0x03)
 #define AS3935_ADDR 0x03 
 #define IRQ_PIN      2
+const uint32_t I2C_TIMEOUT_US = 25000;
 
 #define LED_PIN    6     // Nano D6 -> (330 ohm) -> strip DIN
 #define NUM_LEDS   7     // set to the real number of LEDs on your strip
@@ -39,17 +40,37 @@ uint8_t ANTENNA_TUNING = 0x00;
 uint8_t rd(uint8_t reg) {
   Wire.beginTransmission(AS3935_ADDR);
   Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return 0xFF; // Connection error
+  uint8_t status = Wire.endTransmission(false);
+  if (status != 0) {
+    Serial.print("ERROR: I2C read failed at register 0x");
+    Serial.print(reg, HEX);
+    Serial.print("; Wire status ");
+    Serial.println(status);
+    return 0xFF;
+  }
   
-  Wire.requestFrom(AS3935_ADDR, (uint8_t)1);
-  return Wire.available() ? Wire.read() : 0xFF;
+  Wire.requestFrom((uint8_t)AS3935_ADDR, (uint8_t)1);
+  if (!Wire.available()) {
+    Serial.print("ERROR: No I2C data at register 0x");
+    Serial.println(reg, HEX);
+    return 0xFF;
+  }
+  return Wire.read();
 }
 
-void wr(uint8_t reg, uint8_t val) {
+bool wr(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(AS3935_ADDR);
   Wire.write(reg);
   Wire.write(val);
-  Wire.endTransmission();
+  uint8_t status = Wire.endTransmission();
+  if (status != 0) {
+    Serial.print("ERROR: I2C write failed at register 0x");
+    Serial.print(reg, HEX);
+    Serial.print("; Wire status ");
+    Serial.println(status);
+    return false;
+  }
+  return true;
 }
 
 void irqISR() {
@@ -59,48 +80,53 @@ void irqISR() {
 // --------------------------------
 // Apply parameters with safe masks
 // --------------------------------
-void applySettings() {
+bool applySettings() {
   // AFE Gain (Reg 0x00 bits [5:1])
   uint8_t r0 = rd(0x00);
+  if (r0 == 0xFF) return false;
   r0 &= ~0b00111110; 
   r0 |= ((AFE_GAIN & 0x1F) << 1);
-  wr(0x00, r0);
+  if (!wr(0x00, r0)) return false;
 
   // Noise Floor (Reg 0x01 bits [6:4]) & Watchdog (bits [3:0])
   uint8_t r1 = rd(0x01);
+  if (r1 == 0xFF) return false;
   r1 &= ~0b01111111; // Clear both fields
   r1 |= ((NOISE_FLOOR & 0x07) << 4);
   r1 |= (WATCHDOG_THRESHOLD & 0x0F);
-  wr(0x01, r1);
+  if (!wr(0x01, r1)) return false;
 
   // Spike rejection (Reg 0x02 bits [3:0]) & minimum lightning events (bits [5:4])
   uint8_t r2 = rd(0x02);
+  if (r2 == 0xFF) return false;
   r2 &= ~0b00111111; // Preserve reserved bit 7 and CL_STAT bit 6
   r2 |= ((MIN_LIGHTNING_EVENTS & 0x03) << 4);
   r2 |= (SPIKE_REJECTION & 0x0F);
-  wr(0x02, r2);
+  if (!wr(0x02, r2)) return false;
 
   // Mask disturbers (Reg 0x03 bit 5)
   uint8_t r3 = rd(0x03);
+  if (r3 == 0xFF) return false;
   if (MASK_DISTURBERS) r3 |=  (1 << 5);
   else                 r3 &= ~(1 << 5);
-  wr(0x03, r3);
+  if (!wr(0x03, r3)) return false;
 
   // Antenna Tuning (Reg 0x08 bits [3:0])
   uint8_t r8 = rd(0x08);
+  if (r8 == 0xFF) return false;
   r8 &= ~0b00001111;
   r8 |= (ANTENNA_TUNING & 0x0F);
-  wr(0x08, r8);
+  return wr(0x08, r8);
 }
 
-void as3935_init() {
-  wr(0x3C, 0x96); // Reset registers to default
+bool as3935_init() {
+  if (!wr(0x3C, 0x96)) return false; // Reset registers to default
   delay(10);      // Give it time to settle
 
-  wr(0x3D, 0x96); // Calibrate internal oscillators
+  if (!wr(0x3D, 0x96)) return false; // Calibrate internal oscillators
   delay(10);
 
-  applySettings();
+  return applySettings();
 }
 
 void printRegisterHex(uint8_t reg, uint8_t val) {
@@ -147,33 +173,6 @@ void dumpSettings() {
   Serial.print(" - antenna tuning capacitors: ");
   Serial.print(r8 & 0x0F);
   Serial.println(" steps (8pF each)");
-}
-
-void printTimestamp() {
-  unsigned long ms = millis();
-  unsigned long seconds = ms / 1000;
-  unsigned int days = seconds / 86400;
-  byte hours = (seconds / 3600) % 24;
-  byte minutes = (seconds / 60) % 60;
-  byte secs = seconds % 60;
-  unsigned int millisPart = ms % 1000;
-
-  Serial.print("[uptime ");
-  Serial.print(days);
-  Serial.print("d ");
-  if (hours < 10) Serial.print("0");
-  Serial.print(hours);
-  Serial.print(":");
-  if (minutes < 10) Serial.print("0");
-  Serial.print(minutes);
-  Serial.print(":");
-  if (secs < 10) Serial.print("0");
-  Serial.print(secs);
-  Serial.print(".");
-  if (millisPart < 100) Serial.print("0");
-  if (millisPart < 10) Serial.print("0");
-  Serial.print(millisPart);
-  Serial.print("] ");
 }
 
 void setAllLeds(uint32_t color) {
@@ -228,16 +227,24 @@ uint8_t ledCountForDistance(uint8_t dist) {
 
 void showLightningLeds(uint8_t dist) {
   uint8_t count = ledCountForDistance(dist);
-  uint32_t color = strip.Color(255, 0, 0);
 
   strip.setBrightness(100);
-  for (int8_t remaining = count; remaining >= 0; remaining--) {
-    clearLeds();
-    for (uint8_t i = 0; i < remaining; i++) {
-      strip.setPixelColor(i, color);
+  strip.clear();
+
+  for (int value = 255; value >= 0; value -= 15) {
+    for (uint8_t i = 0; i < count; i++) {
+      strip.setPixelColor(i, strip.Color(value, value, 255));
     }
     strip.show();
-    delay(350);
+    delay(35);
+  }
+
+  for (int value = 255; value >= 0; value -= 15) {
+    for (uint8_t i = 0; i < count; i++) {
+      strip.setPixelColor(i, strip.Color(0, 0, value));
+    }
+    strip.show();
+    delay(35);
   }
 
   strip.setBrightness(BRIGHTNESS);
@@ -260,31 +267,39 @@ void disableAlwaysUnusedPeripherals() {
   power_spi_disable();
   power_timer1_disable();
   power_timer2_disable();
+#if defined(__LGT8FX8P__)
+  PRR1 |= _BV(PRTC3); // LGT Timer3 is started by the core but unused here.
+#endif
 }
 
 void disableSleepOnlyPeripherals() {
+  power_timer0_disable();
   power_twi_disable();
   power_usart0_disable();
 }
 
 void enableSleepOnlyPeripherals() {
+  power_timer0_enable(); // Required by delay() and NeoPixel latch timing.
   power_usart0_enable();
   power_twi_enable();
 }
 
 void enterLowPowerMode() {
-  clearLeds();
   Serial.flush();
   set_sleep_mode(SLEEP_MODE_IDLE);
 
   noInterrupts();
   if (!irqFlag) {
+    // Mask pending Timer0 interrupts as well as stopping its clock.
+    uint8_t timer0InterruptMask = TIMSK0;
+    TIMSK0 = 0;
     sleep_enable();
     disableSleepOnlyPeripherals();
     interrupts();
     sleep_cpu();
     sleep_disable();
     enableSleepOnlyPeripherals();
+    TIMSK0 = timer0InterruptMask;
   } else {
     interrupts();
   }
@@ -293,6 +308,8 @@ void enterLowPowerMode() {
 void setup() {
   Serial.begin(9600);
   Wire.begin();
+  // Bound stalled I2C transactions while Timer0 is running.
+  Wire.setWireTimeout(I2C_TIMEOUT_US, true);
   strip.begin();
   strip.setBrightness(BRIGHTNESS);
   clearLeds();
@@ -302,22 +319,29 @@ void setup() {
   Wire.setClock(100000); 
 
   pinMode(IRQ_PIN, INPUT);
-  attachInterrupt(digitalPinToInterrupt(IRQ_PIN), irqISR, RISING);
 
   Serial.println("AS3935 startup...");
-  as3935_init();
+  Serial.print(F("I2C idle levels: SDA="));
+  Serial.print(digitalRead(SDA));
+  Serial.print(F(", SCL="));
+  Serial.println(digitalRead(SCL));
+  Serial.println(F("Both should be 1 before an I2C transaction."));
+  bool sensorReady = as3935_init();
   disableAlwaysUnusedPeripherals();
   
   // Verify communication by reading back register 0x00
-  uint8_t testRead = rd(0x00);
-  if (testRead == 0xFF || testRead == 0x00) {
+  uint8_t testRead = sensorReady ? rd(0x00) : 0xFF;
+  if (!sensorReady || testRead == 0xFF || testRead == 0x00) {
     Serial.println("ERROR: Cannot communicate with AS3935! Check wiring/I2C address.");
+    Serial.println(F("Sensor unavailable; sleeping. Reset after fixing I2C."));
   } else {
     Serial.println("AS3935 Ready and Listening!");
     dumpSettings();
+    attachInterrupt(digitalPinToInterrupt(IRQ_PIN), irqISR, RISING);
+    // Handle an IRQ already asserted before the interrupt was attached.
+    if (digitalRead(IRQ_PIN)) irqFlag = true;
+    Serial.println("Entering low power mode; waiting for AS3935 IRQ...");
   }
-
-  Serial.println("Entering low power mode; waiting for AS3935 IRQ...");
 }
 
 void loop() {
@@ -333,27 +357,27 @@ void loop() {
   delay(2); 
   
   // Read interrupt source (Reg 0x03, bits [3:0])
-  uint8_t src = rd(0x03) & 0x0F;
-  
-  // Reset flag *after* reading register 0x03, which clears the hardware interrupt
-  irqFlag = false; 
+  // Clear before reading so an IRQ arriving during I2C is not lost.
+  irqFlag = false;
+  uint8_t irqRegister = rd(0x03);
+  if (irqRegister == 0xFF) return;
+  uint8_t src = irqRegister & 0x0F;
 
   switch (src) {
     case 0x01:
-      printTimestamp();
       Serial.println("[IRQ] Noise level too high.");
       showNoiseLeds();
       break;
 
     case 0x04:
-      printTimestamp();
       Serial.println("[IRQ] Disturber detected (false alarm rejected).");
       showDisturberLeds();
       break;
 
     case 0x08: {
-      uint8_t dist = rd(0x07) & 0x3F;
-      printTimestamp();
+      uint8_t distanceRegister = rd(0x07);
+      if (distanceRegister == 0xFF) break;
+      uint8_t dist = distanceRegister & 0x3F;
       Serial.print("⚡ LIGHTNING DETECTED! Approximate Distance: ");
       if (dist == 0x3F) {
         Serial.println("Out of range (>40km)");
@@ -370,7 +394,6 @@ void loop() {
     default:
       // If it returns 0, it means it was a transient pulse that didn't meet criteria
       if (src != 0) {
-        printTimestamp();
         Serial.print("Unknown interrupt code: 0x");
         Serial.println(src, HEX);
       }

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository contains a single Arduino sketch for an AS3935 lightning sensor:
+This repository contains a single Arduino sketch for an AS3935 lightning sensor running on an LGT8F328-32 MCU:
 
 - `lightning_2026_06.ino`: main sketch with I2C helpers, AS3935 setup, interrupt handling, and serial output.
 
@@ -10,11 +10,11 @@ Keep sensor constants, tuning values, and pin definitions near the top of the sk
 
 ## Build, Test, and Development Commands
 
-Use the Arduino IDE or Arduino CLI. Replace `arduino:avr:uno` and `/dev/cu.usbmodemXXXX` with the board FQBN and serial port for your hardware.
+Use the Arduino IDE or Arduino CLI with the installed LGT8F board core. Select the board and clock configuration matching the LGT8F328-32 hardware. Replace `YOUR_LGT8F_BOARD_FQBN` and `/dev/cu.usbmodemXXXX` with the appropriate board FQBN and serial port; use `arduino-cli board listall` to find installed board identifiers.
 
 ```sh
-arduino-cli compile --fqbn arduino:avr:uno .
-arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno .
+arduino-cli compile --fqbn YOUR_LGT8F_BOARD_FQBN .
+arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn YOUR_LGT8F_BOARD_FQBN .
 arduino-cli monitor -p /dev/cu.usbmodemXXXX -c baudrate=9600
 ```
 
@@ -43,3 +43,5 @@ Pull requests should describe the hardware tested, board type, AS3935 module var
 ## Hardware & Configuration Notes
 
 The sketch assumes I2C address `0x03`, IRQ pin `2`, and a `100000` Hz I2C clock. Document any wiring or antenna-tuning changes in the pull request so future contributors can reproduce results.
+
+The target MCU is LGT8F328-32. Verify sleep modes, interrupt wake sources, peripheral power controls, and timer behavior against the LGT8F documentation and installed core before changing power management. Do not assume ATmega328P-specific behavior applies. An Arduino Uno compile alone does not validate this hardware.
