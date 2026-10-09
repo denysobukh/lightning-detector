@@ -61,4 +61,4 @@ Between events, the MCU uses Idle sleep. ADC, SPI, Timers 1/2, and LGT Timer3 cl
 
 Startup should print `AS3935 Ready and Listening!`, decoded registers, and the low-power message. I2C transactions have a 25 ms timeout; Wire status 5 indicates a timeout. Check wiring, power, I2C mode, address, and pull-ups. Idle SDA/SCL readings should both be 1, but that alone does not prove communication works. Reset after fixing a failed startup.
 
-Compilation and startup were verified at 16 MHz. IRQ wake-up, LED behavior, and current consumption still need hardware verification. Contributor guidance is in [AGENTS.md](AGENTS.md).
+Compilation and startup were verified at 16 MHz. IRQ wake-up, LED behavior, and current consumption still need hardware verification.
