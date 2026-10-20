@@ -2,6 +2,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <avr/sleep.h>
 #include <avr/power.h>
+#include <math.h>
 
 // Change this to match your I2C scanner result (usually 0x01, 0x02, or 0x03)
 #define AS3935_ADDR 0x03 
@@ -12,16 +13,43 @@ const uint32_t I2C_TIMEOUT_US = 25000;
 #define NUM_LEDS   7     // set to the real number of LEDs on your strip
 #define BRIGHTNESS 50
 
+// Source -> 20 kOhm -> A1 -> 10 kOhm -> GND; leave AREF unconnected.
+const uint8_t BATTERY_PIN = A1;
+const float ADC_REFERENCE = 2.048;
+const float DIVIDER_RATIO = 3.0;
+const unsigned long BATTERY_DISPLAY_MS = 5000;
+const unsigned long BATTERY_SAMPLE_MS = 500;
+const unsigned long BATTERY_BLINK_MS = 500;
+const uint8_t BATTERY_BRIGHTNESS = 100;
+// Approximate resting-voltage curve for a conventional 4.2 V Li-ion cell.
+const float CHARGE_VOLTAGES[] = {
+  3.00, 3.40, 3.60, 3.65, 3.70, 3.75, 3.80, 3.90, 4.00, 4.10, 4.20
+};
+
 const uint32_t LED_COLOR_OFF = Adafruit_NeoPixel::Color(0, 0, 0);
 const uint32_t LED_COLOR_STARTUP = Adafruit_NeoPixel::Color(0, 80, 255);
 const uint32_t LED_COLOR_NOISE = Adafruit_NeoPixel::Color(255, 0, 120);
 const uint32_t LED_COLOR_DISTURBER = Adafruit_NeoPixel::Color(0, 255, 0);
 const uint32_t LED_COLOR_LIGHTNING_START = Adafruit_NeoPixel::Color(173, 216, 230);
 const uint32_t LED_COLOR_LIGHTNING_TRANSITION = Adafruit_NeoPixel::Color(0, 0, 255);
+const unsigned int LIGHTNING_FRAME_MS = 35;
+const uint8_t LIGHTNING_PHASE_FRAMES = 18;
 
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 volatile bool irqFlag = false;
+
+enum LedIndication : uint8_t { LED_IDLE, LED_FLASH, LED_LIGHTNING };
+struct LedFrame {
+  unsigned long startedAt;
+  uint32_t color;
+  LedIndication indication;
+  uint8_t brightness;
+};
+LedFrame ledFrames[NUM_LEDS] = {};
+uint32_t flashColor = LED_COLOR_OFF;
+unsigned int flashOnMs = 0;
+unsigned int flashOffMs = 0;
 
 // ---------------------------
 // USER SETTINGS (Cleaned Up)
@@ -193,6 +221,87 @@ void clearLeds() {
   setAllLeds(LED_COLOR_OFF);
 }
 
+float readBatteryVoltage() {
+  unsigned long total = 0;
+  for (uint8_t i = 0; i < 16; i++) {
+    total += analogRead(BATTERY_PIN);
+  }
+  return (total / 16.0) * (ADC_REFERENCE / 4095.0) * DIVIDER_RATIO;
+}
+
+float estimateCharge(float voltage) {
+  if (voltage <= CHARGE_VOLTAGES[0]) return 0.0;
+  for (uint8_t i = 1; i < 11; i++) {
+    if (voltage < CHARGE_VOLTAGES[i]) {
+      float fraction = (voltage - CHARGE_VOLTAGES[i - 1]) /
+                       (CHARGE_VOLTAGES[i] - CHARGE_VOLTAGES[i - 1]);
+      return (i - 1 + fraction) * 10.0;
+    }
+  }
+  return 100.0;
+}
+
+void showBatteryCharge(float chargePercent, bool blinkOn) {
+  strip.clear();
+  if (chargePercent <= 0.0) {
+    if (blinkOn) strip.fill(strip.Color(255, 0, 0));
+  } else {
+    uint8_t lit = (uint8_t)ceilf(chargePercent * NUM_LEDS / 100.0);
+    for (uint8_t i = 0; i < lit && i < NUM_LEDS; i++) {
+      strip.setPixelColor(i, strip.Color(0, 255, 0));
+    }
+  }
+  strip.show();
+}
+
+void printBatteryStatus(float voltage, float chargePercent) {
+  Serial.print(F("Voltage: "));
+  Serial.print(voltage, 3);
+  Serial.print(F(" V | Charge (estimated): "));
+  Serial.print(chargePercent, 1);
+  Serial.println(F("%"));
+}
+
+void showStartupBattery() {
+  pinMode(BATTERY_PIN, INPUT);
+  analogReadResolution(12);
+  analogReference(INTERNAL2V048);
+  delay(10);
+  analogRead(BATTERY_PIN); // Discard the first conversion after changing reference.
+  strip.setBrightness(BATTERY_BRIGHTNESS);
+
+  float voltage = readBatteryVoltage();
+  float chargePercent = estimateCharge(voltage);
+  bool blinkOn = true;
+  showBatteryCharge(chargePercent, blinkOn);
+  printBatteryStatus(voltage, chargePercent);
+  unsigned long startedAt = millis();
+  unsigned long lastSample = startedAt;
+  unsigned long lastBlink = startedAt;
+  while (millis() - startedAt < BATTERY_DISPLAY_MS) {
+    unsigned long now = millis();
+    if (now - lastSample >= BATTERY_SAMPLE_MS) {
+      lastSample = now;
+      voltage += 0.25 * (readBatteryVoltage() - voltage);
+      float previousCharge = chargePercent;
+      chargePercent = estimateCharge(voltage);
+      if (chargePercent <= 0.0 && previousCharge > 0.0) {
+        blinkOn = true;
+        lastBlink = now;
+      }
+      showBatteryCharge(chargePercent, blinkOn);
+      printBatteryStatus(voltage, chargePercent);
+    }
+    if (chargePercent <= 0.0 && now - lastBlink >= BATTERY_BLINK_MS) {
+      lastBlink = now;
+      blinkOn = !blinkOn;
+      showBatteryCharge(chargePercent, blinkOn);
+    }
+  }
+  clearLeds();
+  strip.setBrightness(BRIGHTNESS);
+}
+
 void showStartupLeds() {
   for (uint8_t i = 0; i < NUM_LEDS; i++) {
     clearLeds();
@@ -209,13 +318,6 @@ void showStartupLeds() {
   }
 
   clearLeds();
-}
-
-void flashLeds(uint32_t color, unsigned int onMs, unsigned int offMs) {
-  setAllLeds(color);
-  delay(onMs);
-  clearLeds();
-  delay(offMs);
 }
 
 uint8_t ledCountForDistance(uint8_t dist) {
@@ -238,43 +340,92 @@ uint32_t blendLedColors(uint32_t from, uint32_t to, uint8_t amount) {
   return color;
 }
 
+uint32_t scaleLedColor(uint32_t color, uint8_t brightness) {
+  uint32_t scaled = 0;
+  for (uint8_t shift = 0; shift <= 16; shift += 8) {
+    uint32_t channel = (color >> shift) & 0xFF;
+    scaled |= ((channel * (brightness + 1)) >> 8) << shift;
+  }
+  return scaled;
+}
+
+void updateLedIndication() {
+  unsigned long now = millis();
+  bool changed = false;
+  for (uint8_t i = 0; i < NUM_LEDS; i++) {
+    LedFrame &led = ledFrames[i];
+    unsigned long elapsed = now - led.startedAt;
+    uint32_t color = LED_COLOR_OFF;
+    switch (led.indication) {
+      case LED_FLASH:
+        if (elapsed < flashOnMs) color = flashColor;
+        else if (elapsed >= (unsigned long)flashOnMs + flashOffMs) led.indication = LED_IDLE;
+        break;
+
+      case LED_LIGHTNING: {
+        unsigned long frame = elapsed / LIGHTNING_FRAME_MS;
+        if (frame >= 2 * LIGHTNING_PHASE_FRAMES) {
+          led.indication = LED_IDLE;
+          break;
+        }
+        uint8_t value = 255 - (frame % LIGHTNING_PHASE_FRAMES) * 15;
+        color = frame < LIGHTNING_PHASE_FRAMES
+          ? blendLedColors(LED_COLOR_LIGHTNING_TRANSITION, LED_COLOR_LIGHTNING_START, value)
+          : blendLedColors(LED_COLOR_OFF, LED_COLOR_LIGHTNING_TRANSITION, value);
+        break;
+      }
+
+      case LED_IDLE:
+        break;
+    }
+    color = scaleLedColor(color, led.brightness);
+    if (color != led.color) {
+      led.color = color;
+      strip.setPixelColor(i, color);
+      changed = true;
+    }
+  }
+  if (changed) strip.show();
+}
+
+bool ledsAreActive() {
+  for (uint8_t i = 0; i < NUM_LEDS; i++) {
+    if (ledFrames[i].indication != LED_IDLE) return true;
+  }
+  return false;
+}
+
 void showLightningLeds(uint8_t dist) {
+  unsigned long now = millis();
   uint8_t count = ledCountForDistance(dist);
-
-  strip.setBrightness(100);
-  strip.clear();
-
-  for (int value = 255; value >= 0; value -= 15) {
-    uint32_t color = blendLedColors(LED_COLOR_LIGHTNING_TRANSITION, LED_COLOR_LIGHTNING_START, value);
-    for (uint8_t i = 0; i < count; i++) {
-      strip.setPixelColor(i, color);
-    }
-    strip.show();
-    delay(35);
+  // Only replace the selected pixels; other pixels retain their own timelines.
+  for (uint8_t i = 0; i < count; i++) {
+    ledFrames[i].indication = LED_LIGHTNING;
+    ledFrames[i].startedAt = now;
+    ledFrames[i].brightness = 100;
   }
+  updateLedIndication();
+}
 
-  for (int value = 255; value >= 0; value -= 15) {
-    uint32_t color = blendLedColors(LED_COLOR_OFF, LED_COLOR_LIGHTNING_TRANSITION, value);
-    for (uint8_t i = 0; i < count; i++) {
-      strip.setPixelColor(i, color);
-    }
-    strip.show();
-    delay(35);
+void flashLeds(uint32_t color, unsigned int onMs, unsigned int offMs, uint8_t brightness) {
+  flashColor = color;
+  flashOnMs = onMs;
+  flashOffMs = offMs;
+  unsigned long now = millis();
+  for (uint8_t i = 0; i < NUM_LEDS; i++) {
+    ledFrames[i].indication = LED_FLASH;
+    ledFrames[i].startedAt = now;
+    ledFrames[i].brightness = brightness;
   }
-
-  strip.setBrightness(BRIGHTNESS);
-  clearLeds();
+  updateLedIndication();
 }
 
 void showNoiseLeds() {
-  flashLeds(LED_COLOR_NOISE, 120, 120);
+  flashLeds(LED_COLOR_NOISE, 120, 120, BRIGHTNESS);
 }
 
 void showDisturberLeds() {
-  strip.setBrightness(10);
-  flashLeds(LED_COLOR_DISTURBER, 120, 120);
-  strip.setBrightness(BRIGHTNESS);
-  clearLeds();
+  flashLeds(LED_COLOR_DISTURBER, 120, 120, 10);
 }
 
 void disableAlwaysUnusedPeripherals() {
@@ -304,7 +455,7 @@ void enterLowPowerMode() {
   set_sleep_mode(SLEEP_MODE_IDLE);
 
   noInterrupts();
-  if (!irqFlag) {
+  if (!irqFlag && !ledsAreActive()) {
     // Mask pending Timer0 interrupts as well as stopping its clock.
     uint8_t timer0InterruptMask = TIMSK0;
     TIMSK0 = 0;
@@ -328,7 +479,10 @@ void setup() {
   strip.begin();
   strip.setBrightness(BRIGHTNESS);
   clearLeds();
+  showStartupBattery();
   showStartupLeds();
+  // Event brightness is applied per pixel so overlapping events remain independent.
+  strip.setBrightness(255);
   
   // Set I2C clock to 100kHz (AS3935 maximum stable speed for I2C)
   Wire.setClock(100000); 
@@ -359,15 +513,7 @@ void setup() {
   }
 }
 
-void loop() {
-  if (!irqFlag) {
-    enterLowPowerMode();
-  }
-
-  if (!irqFlag) {
-    return;
-  }
-
+void handleSensorInterrupt() {
   // Crucial: Wait 2ms after IRQ goes high before reading I2C
   delay(2); 
   
@@ -414,4 +560,12 @@ void loop() {
       }
       break;
   }
+}
+
+void loop() {
+  if (irqFlag) handleSensorInterrupt();
+  // A newer IRQ takes priority over advancing the previous animation.
+  if (irqFlag) return;
+  updateLedIndication();
+  if (!ledsAreActive()) enterLowPowerMode();
 }
